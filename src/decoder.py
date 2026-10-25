@@ -224,7 +224,7 @@ class Decoder(BaseModel):
         """Choose a function and fill its arguments.
 
         Args:
-            prompt: Full prompt (see build_prompt), without the JSON start.
+            prompt: Full prompt (see prompt), without the JSON start.
             functions: Available functions.
 
         Returns:
