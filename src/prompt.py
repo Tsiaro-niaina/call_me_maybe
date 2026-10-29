@@ -27,13 +27,13 @@ def build_prompt(functions: list[FunctionDefinition], request: str) -> str:
     system = (
         "You are a function calling assistant. Choose the single most "
         "appropriate function for the user's request and give its "
-        "arguments.\n\nAvailable functions:\n"
-        f"{listing}\n\n"
+        "arguments.\nAvailable functions:\n"
+        f"{listing}\n"
         'Answer only with JSON: {"name": <function name>, '
         '"parameters": {<arguments>}}'
     )
     return (
         f"<|im_start|>system\n{system}<|im_end|>\n"
         f"<|im_start|>user\n{request}<|im_end|>\n"
-        "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        "<|im_start|>assistant"
     )
