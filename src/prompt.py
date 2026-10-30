@@ -35,5 +35,5 @@ def build_prompt(functions: list[FunctionDefinition], request: str) -> str:
     return (
         f"<|im_start|>system\n{system}<|im_end|>\n"
         f"<|im_start|>user\n{request}<|im_end|>\n"
-        "<|im_start|>assistant"
+        "<|im_start|>assistant\n"
     )
