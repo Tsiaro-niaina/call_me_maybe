@@ -14,6 +14,7 @@ from .rules import (
     INTEGER_START,
     NUMBER_COMPLETE,
     NUMBER_START,
+    OPENING_QUOTE,
     read_string_token,
 )
 from .vocab import Vocabulary
@@ -87,7 +88,7 @@ class Decoder(BaseModel):
                 word for word in words if word.startswith(word_so_far)
             ]
             if len(possible_words) == 1:
-                return possible_words[0]
+                return possible_words[0]  # no need to ask the model
 
             def is_valid(token_text: str) -> bool:
                 if token_text[0] in end_characters:
@@ -136,7 +137,7 @@ class Decoder(BaseModel):
                 context_ids, is_valid
             )
             if token_text[0] in CHARACTERS_AFTER_VALUE:
-                break
+                break  # the model ended the number
             number_text += token_text
             context_ids.append(token_id)
         if number_complete.fullmatch(number_text) is None:
@@ -146,13 +147,16 @@ class Decoder(BaseModel):
     def generate_string(
         self, context_ids: list[int]
     ) -> tuple[str, list[int]]:
-        """Generate the content of a JSON string (still escaped).
+        """Generate a JSON string, opening quote included.
+
+        The model writes the opening quote itself, because BPE merges it
+        with the first characters of some values: ' "*' is a single token.
 
         Args:
-            context_ids: Context ending right after the opening quote.
+            context_ids: Context ending right after the colon.
 
         Returns:
-            (string content, context with the content written).
+            (string content still escaped, context with the string written).
 
         Raises:
             ValueError: If the string is not closed after the token limit.
@@ -160,30 +164,44 @@ class Decoder(BaseModel):
         context_ids = list(context_ids)
         string_text = ""
         after_backslash = False
+        is_opened = False
         for _ in range(MAX_STRING_TOKENS):
 
             def is_valid(token_text: str) -> bool:
-                reading = read_string_token(token_text, after_backslash)
+                reading = read_string_token(
+                    token_text, after_backslash, is_opening=not is_opened
+                )
                 if reading is None:
                     return False
                 content, is_end, _ = reading
                 if string_text == "" and content.startswith(" "):
+                    # The model writes ' *' for '*': a value never starts
+                    # with a space glued to text. A value made only of
+                    # spaces stays possible.
                     return is_end and content.strip(" ") == ""
                 return True
 
             token_id, token_text = self.first_valid_token(
                 context_ids, is_valid
             )
-            reading = read_string_token(token_text, after_backslash)
-            if reading is None:
+            reading = read_string_token(
+                token_text, after_backslash, is_opening=not is_opened
+            )
+            if reading is None:  # cannot happen: the token was checked
                 raise ValueError(f"invalid string token: {token_text!r}")
             content, is_end, after_backslash = reading
             string_text += content
             if is_end:
-                if content:
-                    context_ids += self.encode(content)
+                # The closing token is not kept: it also holds the end of
+                # the skeleton, which is written separately.
+                written_text = content
+                if not is_opened:
+                    written_text = OPENING_QUOTE + content
+                if written_text:
+                    context_ids += self.encode(written_text)
                 return string_text, context_ids
             context_ids.append(token_id)
+            is_opened = True
         raise ValueError(f"string longer than {MAX_STRING_TOKENS} tokens")
 
     def generate_call(
@@ -208,14 +226,13 @@ class Decoder(BaseModel):
         )
         parameters = function_by_name[function_name].parameters
         argument_values: dict[str, Any] = {}
+        # Skeleton text not yet written in the context.
         skeleton_text = function_name + '", "parameters": {'
         for position, parameter_name in enumerate(parameters):
             parameter_type = parameters[parameter_name].type
             if position > 0:
                 skeleton_text += ", "
             skeleton_text += json.dumps(parameter_name) + ":"
-            if parameter_type == "string":
-                skeleton_text += ' "'
             context_ids = context_ids + self.encode(skeleton_text)
             skeleton_text = ""
             if parameter_type == "string":

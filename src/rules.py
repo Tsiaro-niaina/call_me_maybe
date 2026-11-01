@@ -3,7 +3,10 @@
 import re
 
 STRING_ESCAPE_LETTERS = '"\\/bfnrt'
+OPENING_QUOTE = ' "'
 CHARACTERS_AFTER_VALUE = ",}"
+
+# A number may start with one space: BPE writes ' -' as a single token.
 NUMBER_START = re.compile(r" ?-?((0|[1-9][0-9]*)(\.[0-9]*)?)?")
 NUMBER_COMPLETE = re.compile(r" ?-?(0|[1-9][0-9]*)(\.[0-9]+)?")
 INTEGER_START = re.compile(r" ?-?(0|[1-9][0-9]*)?")
@@ -11,7 +14,7 @@ INTEGER_COMPLETE = re.compile(r" ?-?(0|[1-9][0-9]*)")
 
 
 def read_string_token(
-    token_text: str, after_backslash: bool
+    token_text: str, after_backslash: bool, is_opening: bool = False
 ) -> tuple[str, bool, bool] | None:
     """Read a token as a part of a JSON string.
 
@@ -19,6 +22,9 @@ def read_string_token(
         token_text: Text of the token.
         after_backslash: True if the previous token ended with a lone
             backslash, which still waits for its escape letter.
+        is_opening: True if the token must open the string. It then starts
+            with the opening quote (with its space), followed by the first
+            characters of the string if BPE merged them (' "*' is one token).
 
     Returns:
         None if the token cannot be part of the string. Otherwise a tuple
@@ -26,6 +32,10 @@ def read_string_token(
         the string, whether the token holds the closing quote, and whether
         a lone backslash is now waiting for its escape letter.
     """
+    if is_opening:
+        if not token_text.startswith(OPENING_QUOTE):
+            return None
+        token_text = token_text[len(OPENING_QUOTE):]
     content = ""
     for position, character in enumerate(token_text):
         if after_backslash:
