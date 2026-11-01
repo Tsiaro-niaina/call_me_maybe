@@ -20,13 +20,14 @@ should be called and its typed arguments:
 ```
 
 A 0.6B model is unreliable when it is only prompted to write JSON. Here the
-JSON is never "hoped for": at every step the logits of the tokens that would
-break the structure or the schema are set to `-inf`, so the output is valid
-and schema-compliant by construction. The model only decides **which
-function** to call and **what the argument values are**.
+JSON is never "hoped for": at every step, only the tokens that keep the
+output valid and schema-compliant can be chosen, so the result is valid by
+construction. The model only decides **which function** to call and **what
+the argument values are**.
 
 The function is chosen by the LLM (no regex, keyword or other heuristic),
-and nothing in the code depends on the provided example files.
+the generated values are never corrected afterwards, and nothing in the
+code depends on the provided example files.
 
 ## Instructions
 
@@ -70,7 +71,8 @@ src/
   loader.py     reading/validating the JSON files, writing the result
   models.py     pydantic models (definitions, prompts, results)
   prompt.py     prompt construction
-  vocab.py      vocabulary and token classes
+  vocab.py      vocabulary: token id -> text
+  rules.py      which texts are valid JSON numbers and strings
   decoder.py    constrained decoding
 llm_sdk/        provided SDK (unmodified)
 data/input/     example input files
@@ -82,92 +84,95 @@ data/input/     example input files
 
 `vocab.json` is a byte-level BPE table: its keys are not plain text (`Ġ` is a
 space, `Ċ` a newline, ...). Each key is converted back to its real string with
-the inverse of the GPT-2 `bytes_to_unicode` mapping. Tokens that do not decode
-to complete UTF-8 text (pieces of multi-byte characters) are dropped.
+the inverse of the GPT-2 `bytes_to_unicode` mapping, which gives a dictionary
+`token id -> text`. Tokens that do not decode to complete UTF-8 text (pieces
+of multi-byte characters) are left out.
 
-The important point is that a token is not a character: `"}}`, `",` or `)",`
-are single tokens. A token is therefore never validated on its own, but on
-the **text it would add** to the output.
+A token is not a character: `"}}`, `",` or `)",` are single tokens, and BPE
+glues a space to the next characters (` -`, ` true`, ` "*`). A token is
+therefore never judged alone, but on **the text it would add** to the output.
 
-Once, at load time, the tokens are classified so that no per-step scan of the
-~150k tokens is needed:
+### 2. Prompt and skeleton (`prompt.py`, `decoder.py`)
 
-- `string_ok[pending]`: tokens that can appear inside a JSON string (no raw
-  quote, no control character, valid escapes). `pending` tells whether the
-  previous token ended with a lone backslash.
-- `closers[pending]`: tokens that contain the first unescaped quote, split in
-  *(content before the quote, text after it)*, e.g. `)",` -> `(")", ",")`.
-- `number_tokens`: tokens made only of `-`, `.` and digits.
-- `str_to_ids`: text -> token ids, to turn "valid next strings" into ids.
-
-### 2. Skeleton and prompt (`prompt.py`, `decoder.py`)
-
-The prompt is written in ChatML (Qwen format) with an empty `<think>` block
-so that Qwen3 does not start reasoning. It contains the list of functions
-(name, parameter names and types, description) and the request.
+The prompt uses the ChatML format of Qwen, with the list of functions (name,
+parameter names and types, description) and the request. It ends with the
+empty `<think>\n\n</think>\n\n` block that the Qwen3 template inserts when
+thinking is disabled. The program writes the start of the answer itself, so
+the model never gets to write its own `<think>` block: without the empty
+block the results changed (see Challenges).
 
 The JSON skeleton is built by the program, not by the model:
 
 ```
-{"name": "<LLM choice>", "parameters": {"<key>": <LLM value>, "<key>": ...}}
+{"name": "<LLM choice>", "parameters": {"<key>":<LLM value>, "<key>":<LLM value>}}
 ```
 
-Fixed parts (`{"name": "`, key names taken from the definition, separators)
-are appended to the context directly, with no forward pass.
+Fixed parts (`{"name": "`, the key names taken from the definition, the
+separators) are appended to the context without calling the model. Each key
+is written up to the colon only: the leading space and the opening quote of
+the value are chosen by the model, because BPE merges them with the next
+characters (` -3` is ` -` + `3` but `7` is ` ` + `7`; `"*"` is one chunk).
 
-### 3. Function name
+### 3. Choosing the next token (`Decoder.first_valid_token`)
 
-At each step, the allowed tokens are those whose text extends the current
-text towards at least one function name. Every other logit is set to `-inf`
-and the argmax is taken. As soon as a single name remains, it is completed
-without calling the model.
+The model returns one logit (score) per token of the vocabulary. The tokens
+are examined from the most to the least likely, and the first one whose text
+keeps the output valid is chosen. This gives exactly the same result as
+setting the logits of the invalid tokens to `-inf` and taking the argmax, but
+only the few tokens that are examined have to be checked, so no per-step
+classification of the whole vocabulary is needed.
 
-### 4. Parameter values (by type from `functions_definition.json`)
+### 4. Function name (`generate_word`)
 
-- **`number` / `integer`**: a small automaton
-  (`start -> minus/zero/int -> dot -> frac`) validates the number character by
-  character, so `007`, `1.` or `.5` can never be produced. A token is allowed
-  if the whole token keeps the automaton valid. The number can end only in an
-  accepting state, and the model ends it by choosing a token that starts with
-  the delimiter (`,` or `}`). `integer` forbids the decimal point. The forced skeleton stops right after
-  the colon and the model picks the leading space itself: BPE writes `-3` as
-  `' -'` + `'3'` but `7` as `' '` + `'7'`, so forcing a lone space would push
-  the model towards digits.
-- **`string`**: any token valid inside a JSON string is allowed. The string
-  ends when the model picks a *closing token*: a token containing the first
-  unescaped quote whose remaining text is a prefix of the skeleton that
-  follows (`",`, `"}}`, `)",`...). The content before the quote is kept, and
-  the closing token itself is replaced by the forced skeleton. Escapes are
-  enforced (`\\`, `\"`, `\n`...), so a regex such as `\d+` must be written
-  `\\d+` and decodes correctly with `json.loads`.
-- **`boolean`**: the model chooses between ` true` and ` false` (single
-  tokens with their leading space) with the same mechanism as function names.
+A token is valid if the text written so far plus the token is still the
+beginning of at least one function name. When a single name remains, it is
+completed without calling the model. The model ends a name by writing the
+closing quote.
+
+### 5. Parameter values, by type (`rules.py`, `decoder.py`)
+
+- **`number` / `integer`**: four regular expressions describe the valid
+  beginnings and the complete forms of a JSON number (one optional leading
+  space, optional minus, no leading zero, a digit after the decimal point).
+  A token is valid if the text stays a valid beginning, so `007`, `1.5.2` or
+  `.5` can never be produced. The model ends the number by writing a token
+  that starts with `,` or `}`, accepted only when the number is complete.
+  `integer` forbids the decimal point.
+- **`string`**: the model writes the opening quote, then the content. Any
+  character is allowed except a raw quote and control characters, and after
+  a backslash only a valid escape letter is allowed (`\\`, `\"`, `\n`...), so
+  a regex such as `\d+` is written `\\d+` and decodes correctly with
+  `json.loads`. The string ends with the first token that contains an
+  unescaped quote, if what follows the quote is empty or starts with `,` or
+  `}`. The characters before the quote are kept; the rest of the token is
+  dropped and the skeleton is written separately. A value cannot start with
+  a space glued to text (the model writes ` *` for `*`), but a value made only
+  of spaces is allowed.
+- **`boolean`**: the model chooses between ` true` and ` false` (single tokens
+  with their leading space), like a function name.
 
 Other types are reported as an error for that prompt.
 
-### 5. Output
+### 6. Output
 
 Results are validated with pydantic and written as a JSON array of
 `{prompt, name, parameters}` objects (numbers as floats, e.g. `2.0`).
 
-### Speed-ups
-
-- Forced tokens (skeleton, unique function name) never call the model.
-- The model is skipped whenever only one token is allowed.
-- Token classes are precomputed once; "valid next strings" are turned into
-  ids with a dictionary lookup.
-
 ## Design decisions
 
 - **Hand-built skeleton instead of a generic JSON automaton.** The schema is
-  known, so the model only decides at the value positions. It is simpler,
-  faster (fewer forward passes) and the structure cannot be wrong.
-- **Constraints on text, not on tokens.** Because of BPE merges, validity is
-  computed from the string a token adds.
+  known, so the model only decides at the value positions: the structure
+  cannot be wrong, there are fewer model calls, and the code is shorter.
+- **Rules on text, not on tokens.** Validity is computed from the string a
+  token adds, with regular expressions and one small string reader, instead
+  of tables precomputed over the whole vocabulary.
+- **Follow the natural tokenization.** The context the model sees is the one
+  BPE would produce for the same JSON, which matters for small models.
 - **Short prompt.** The SDK has no KV cache (and private attributes are
   forbidden), so every generated token recomputes the whole context: the cost
-  grows with the prompt length. A long prompt with rules and examples doubled
-  the run time without improving the score (see below).
+  grows with the prompt length.
+- **No post-correction.** The values written by the model are returned as they
+  are.
 - **pydantic everywhere** (models, vocabulary, decoder), as required.
 - **Errors are never fatal.** Missing or invalid files, wrong JSON shapes and
   model-loading problems end with a clear message on stderr. If one prompt
@@ -177,76 +182,82 @@ Results are validated with pydantic and written as a JSON array of
 
 ## Performance analysis
 
-Measured on CPU only (no GPU), on the 11 provided prompts and on a personal
-set of 14 prompts with 6 other functions:
+Measured on CPU only (no GPU), on the 11 provided prompts:
 
-| Metric | Provided prompts (11) | Personal set (14) |
-|---|---|---|
-| Valid JSON, schema-compliant | 11/11 | 14/14 |
-| Correct function | 11/11 | 14/14 |
-| Correct arguments | 10/11 (about 91%) | 13/14 (about 93%) |
-| Run time, personal laptop | 220-260 s | about 180 s |
+| Metric | Result |
+|---|---|
+| Valid JSON, schema-compliant | 11/11 |
+| Correct function | 11/11 |
+| Correct arguments | XX/11 |
+| Run time, personal laptop | XX s |
+| Run time, school computer | XX s |
 
 The substitution results were checked by applying the generated regex to the
-source string and comparing with the expected text. The one failure is the
-prompt "Replace all vowels ... with asterisks": the regex is correct but the
-model writes the word `asterisk` instead of `*`.
+source string and comparing with the expected text, since several regexes are
+valid for the same request.
 
 Observations:
 
-- Time is dominated by forward passes (about 2 s each on the laptop).
-  Simple prompts take 7-20 s, substitution prompts 30-55 s because they
-  generate three strings.
+- Time is dominated by forward passes (about 2 s each on the laptop). Every
+  generated string costs about one pass per token, so the substitution prompts
+  (three strings) are the slowest.
 - A prompt with extra rules and examples made the run about 2.3x slower
   (about 500 s) with the same score.
-- Shortening the prompt further saved about 17% of the time but dropped the
-  score to 9/11: small models are very sensitive to the prompt wording.
-- Validity is not a statistical property: it comes from the masks, not from
-  the model.
-
-### Known limitations
-
-- **Values come from a 0.6B model.** The masks guarantee the form of the
-  output, not the correctness of the values. In "Replace all vowels ... with
-  asterisks" the model writes the word `asterisk` instead of `*`. There is no
-  post-correction on purpose: fixing values with rules would be a heuristic.
-- **Quotes inside a string.** The model tends to copy them without escaping,
-  and an unescaped quote then looks like the end of the string:
-  `Convert 'say "hi"' to uppercase` gives `say ` instead of `say "hi"`.
-- **Prompt sensitivity.** Small changes in the prompt wording change the
-  results, in both directions (see above).
-- **Speed.** There is no KV cache, so the run time grows with the number of
-  prompts and with the prompt length. On a slow CPU the 5 minutes limit is
-  tight for the 11 provided prompts.
-- **Characters** split across several tokens (some emojis and rare
-  characters) cannot be generated inside a string, and `\uXXXX` escapes are
-  not produced.
-- **Caps**: strings are limited to 150 tokens and numbers to 25 tokens.
-- **Types**: `number`, `integer`, `string` and `boolean` are supported. Other
-  types (arrays, objects, null) are reported as an error for that prompt.
+- A shorter prompt saved about 17% of the time but dropped the score from
+  10/11 to 9/11.
+- Removing the empty `<think>` block also changed the results (the
+  replacement for "asterisks" became `*****`). Small models are very
+  sensitive to the exact prompt.
+- Validity is not a statistical property: it comes from the constraints, not
+  from the model.
 
 ## Challenges faced
 
 - **Tokens that glue content and the closing quote.** The first version only
-  allowed a string to end with a token *starting* with `"`. The real
-  vocabulary has tokens like `)",`. The mask forbade the model's favourite
-  token and forced a wrong one, producing the regex `([0-9]+)|`. It was
-  found by logging, for each step, the model's unconstrained choice next to
-  the constrained one, and fixed with the `closers` table.
+  allowed a string to end with a token *starting* with a quote. The real
+  vocabulary has tokens like `)",`. The constraint forbade the model's
+  favourite token and forced a wrong one, producing the regex `([0-9]+)|`. It
+  was found by logging, at each step, the model's unconstrained choice next
+  to the constrained one.
 - **Spaces and BPE.** A negative number came out positive (`-3` became `3`)
   because the skeleton forced a lone space after the colon, which BPE never
-  produces before a minus sign. The model now chooses the space itself.
+  produces before a minus sign. Later, a replacement came out as ` *` (with a
+  space) because the opening quote was forced alone, while BPE merges it with
+  a symbol. The skeleton now stops at the colon and the model writes the
+  space and the opening quote itself.
 - **Run time.** No KV cache and a growing prompt exceeded the 5 minutes limit.
-  Solved by keeping the prompt short, forcing deterministic tokens and
-  skipping the model when only one token is possible.
-- **JSON escaping of regexes.** A single backslash is not valid JSON, so the
-  mask only accepts valid escapes after a backslash, and the value is decoded
-  with `json.loads`.
+  Solved by keeping the prompt short and not calling the model when a single
+  choice remains.
+- **JSON escaping of regexes.** A single backslash is not valid JSON, so only
+  valid escapes are accepted after a backslash, and the value is decoded with
+  `json.loads`.
 - **Limits of a 0.6B model.** The model sometimes copies a word from the
   request instead of the symbol it stands for. Constrained decoding
   guarantees the form of the output, not the correctness of the values.
 - **Disk space.** The model and package caches were moved out of the home
   directory with `HF_HOME` and `UV_CACHE_DIR`.
+
+### Known limitations
+
+- **Values come from a 0.6B model.** The constraints guarantee the form of
+  the output, not the correctness of the values.
+- **Quotes inside a string.** The model tends to copy them without escaping,
+  and an unescaped quote then looks like the end of the string:
+  `Convert 'say "hi"' to uppercase` gives `say ` instead of `say "hi"`.
+- **Leading spaces.** A value that starts with a space followed by text cannot
+  be generated (a value made only of spaces can).
+- **Prompt sensitivity.** Small changes in the prompt change the results, in
+  both directions.
+- **Speed.** There is no KV cache, so the run time grows with the number of
+  prompts and with the prompt length. On a slow CPU the 5 minutes limit is
+  tight.
+- **Characters** split across several tokens (some emojis and rare
+  characters) cannot be generated inside a string, and `\uXXXX` escapes are
+  not produced.
+- **Caps**: strings are limited to 150 tokens and numbers to 25 tokens (a
+  longer one is reported as an error for that prompt).
+- **Types**: `number`, `integer`, `string` and `boolean` are supported. Other
+  types (arrays, objects, null) are reported as an error for that prompt.
 
 ## Testing strategy
 
@@ -254,15 +265,13 @@ Observations:
   JSON, JSON that is not an array, missing keys, empty function list and
   empty prompt list all give a clear error without a traceback.
 - **Provided prompts**: a throwaway script generated the 11 calls and compared
-  them with expected values (applying the regex for substitutions, since
-  several regexes are valid).
-- **Mask debugging**: a trace of each step showing where the mask overrides the
-  model's own preference, used to find the closing-quote bug.
-- **Personal test set**: 14 prompts with 6 other functions (`integer`,
-  `boolean`, negative and decimal numbers, an empty string, an accent, escaped
-  quotes) and expected outputs, run locally and not part of the repository. It
-  revealed the leading-space bug on negative numbers. The remaining failure is
-  the unescaped quote case described above.
+  them with expected values (applying the regex for substitutions).
+- **Mask debugging**: a trace of each step showing where the constraint
+  overrides the model's own preference, used to find the closing-quote bug.
+- **Personal test set** (not part of the repository): 14 prompts with 6 other
+  functions (`integer`, `boolean`, negative and decimal numbers, an empty
+  string, an accent, escaped quotes), used during development. It revealed
+  the leading-space bug on negative numbers.
 - **Static checks**: `flake8` and `mypy` through `make lint`.
 - **Clean-clone check**: clone the repository and run only `uv sync` then
   `uv run python -m src`.
@@ -271,10 +280,10 @@ Observations:
 
 ```console
 $ make run
-[1/11] fn_add_numbers (16.1s)
+[1/11] fn_add_numbers (...)
 ...
-[11/11] fn_substitute_string_with_regex (35.7s)
-Total: 230s
+[11/11] fn_substitute_string_with_regex (...)
+Total: ...
 [
   {
     "prompt": "Greet shrek",
@@ -285,6 +294,8 @@ Total: 230s
 ]
 ```
 
+The time printed after each prompt depends on the machine.
+
 ```console
 $ uv run python -m src --input missing.json
 Error: file not found: missing.json
@@ -293,21 +304,18 @@ Error: file not found: missing.json
 ## Resources
 
 - Qwen3 model card: https://huggingface.co/Qwen/Qwen3-0.6B
-- B. T. Willard, R. Louf, *Efficient Guided Generation for Large Language
-  Models*, 2023 (arXiv:2307.09702)
-- R. Sennrich et al., *Neural Machine Translation of Rare Words with Subword
-  Units*, 2016 (BPE)
-- A. Radford et al., *Language Models are Unsupervised Multitask Learners*,
-  2019 (GPT-2, byte-level BPE)
+- about constrained decoding: https://www.zeroentropy.dev/concepts/constrained-decoding/
+- everything about tokenization: https://www.openxcell.com/blog/llm-tokenization
 - JSON specification, RFC 8259: https://www.rfc-editor.org/rfc/rfc8259
-- pydantic documentation: https://docs.pydantic.dev
-- uv documentation: https://docs.astral.sh/uv/
+- Python `re` module: https://docs.python.org/3/library/re.html
+
 
 ### Use of AI
 
 An AI assistant (Claude) was used as a tutor and pair-programming partner
 for:
 
-- reasoning about bugs from the logs (for instance the closing-quote issue
-  above) and about the run time.
-- redaction of README.md
+- gave me a global plan on where to start and the architecture
+- shortcut to explain every concept that I needed to learn
+- reasoning about bugs from the logs (the closing-quote and leading-space
+  issues above), about the run time, and about simplifying the decoder.

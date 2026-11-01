@@ -5,8 +5,6 @@ import re
 STRING_ESCAPE_LETTERS = '"\\/bfnrt'
 OPENING_QUOTE = ' "'
 CHARACTERS_AFTER_VALUE = ",}"
-
-# A number may start with one space: BPE writes ' -' as a single token.
 NUMBER_START = re.compile(r" ?-?((0|[1-9][0-9]*)(\.[0-9]*)?)?")
 NUMBER_COMPLETE = re.compile(r" ?-?(0|[1-9][0-9]*)(\.[0-9]+)?")
 INTEGER_START = re.compile(r" ?-?(0|[1-9][0-9]*)?")
