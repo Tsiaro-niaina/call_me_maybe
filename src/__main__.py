@@ -1,6 +1,9 @@
+"""Entry point of the function calling tool."""
+
 import argparse
 import json
 import sys
+import textwrap
 import time
 
 from llm_sdk import Small_LLM_Model
@@ -35,8 +38,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def format_function_call(function_call: FunctionCall) -> str:
+    """Return a function call as indented JSON, ready to sit in an array.
+
+    Args:
+        function_call: The call to format.
+
+    Returns:
+        The JSON text, indented by two spaces like the elements of an array.
+    """
+    call_text = json.dumps(
+        function_call.model_dump(), indent=2, ensure_ascii=False
+    )
+    return textwrap.indent(call_text, "  ")
+
+
 def run(args: argparse.Namespace) -> int:
     """Load the data, process every prompt and write the results.
+
+    Each result is printed as soon as it is generated, so that the output on
+    stdout is a JSON array that grows one element at a time.
 
     Args:
         args: Parsed command line arguments.
@@ -48,45 +69,47 @@ def run(args: argparse.Namespace) -> int:
         DataError: On a problem with the files or the model.
     """
     functions = load_functions(args.functions_definition)
-    prompts = load_prompts(args.input)
+    prompt_items = load_prompts(args.input)
     try:
         model = Small_LLM_Model()
         vocab_path = model.get_path_to_vocab_file()
-    except Exception as exc:
-        raise DataError(f"cannot load the model: {exc}") from exc
+    except Exception as error:
+        raise DataError(f"cannot load the model: {error}") from error
     decoder = Decoder(model=model, vocab=Vocabulary.from_file(vocab_path))
 
-    results: list[FunctionCall] = []
-    failures = 0
-    started = time.time()
-    for index, item in enumerate(prompts, start=1):
-        step = time.time()
+    function_calls: list[FunctionCall] = []
+    failed_prompts = 0
+    start_time = time.time()
+    print("[", flush=True)
+    for prompt_number, prompt_item in enumerate(prompt_items, start=1):
         try:
-            name, params = decoder.generate_call(
-                build_prompt(functions, item.prompt), functions
+            function_name, argument_values = decoder.generate_call(
+                build_prompt(functions, prompt_item.prompt), functions
             )
-        except (ValueError, RuntimeError) as exc:
-            failures += 1
-            print(f"Warning: prompt #{index} skipped: {exc}", file=sys.stderr)
+        except (ValueError, RuntimeError) as error:
+            failed_prompts += 1
+            print(
+                f"Warning: prompt #{prompt_number} skipped: {error}",
+                file=sys.stderr,
+            )
             continue
-        results.append(
-            FunctionCall(prompt=item.prompt, name=name, parameters=params)
+        function_call = FunctionCall(
+            prompt=prompt_item.prompt,
+            name=function_name,
+            parameters=argument_values,
         )
-        print(
-            f"[{index}/{len(prompts)}] {name} ({time.time() - step:.1f}s)",
-            file=sys.stderr,
-        )
-    print(f"Total: {time.time() - started:.0f}s", file=sys.stderr)
-    save_results(args.output, results)
+        if function_calls:
+            print(",")
+        print(format_function_call(function_call), end="", flush=True)
+        function_calls.append(function_call)
+    print("\n]" if function_calls else "]")
+    print(f"Total: {time.time() - start_time:.0f}s", file=sys.stderr)
+    save_results(args.output, function_calls)
     print(
-        json.dumps(
-            [r.model_dump() for r in results], indent=2, ensure_ascii=False
-        )
+        f"{len(function_calls)} result(s) written to {args.output}",
+        file=sys.stderr,
     )
-    print(
-        f"{len(results)} result(s) written to {args.output}", file=sys.stderr
-    )
-    return 1 if failures else 0
+    return 1 if failed_prompts else 0
 
 
 def main() -> int:
@@ -98,14 +121,14 @@ def main() -> int:
     args = parse_args()
     try:
         return run(args)
-    except DataError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    except DataError as error:
+        print(f"Error: {error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("Interrupted.", file=sys.stderr)
         return 130
-    except Exception as exc:
-        print(f"Unexpected error: {exc}", file=sys.stderr)
+    except Exception as error:
+        print(f"Unexpected error: {error}", file=sys.stderr)
         return 1
 
 

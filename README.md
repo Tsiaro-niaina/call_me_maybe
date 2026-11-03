@@ -67,11 +67,12 @@ Project layout:
 
 ```
 src/
+  __init__.py   to execute the source as a module
   __main__.py   CLI, main loop, error handling
   loader.py     reading/validating the JSON files, writing the result
   models.py     pydantic models (definitions, prompts, results)
   prompt.py     prompt construction
-  vocab.py      vocabulary: token id -> text
+  vocabulary.py      vocabulary: token id -> text
   rules.py      which texts are valid JSON numbers and strings
   decoder.py    constrained decoding
 llm_sdk/        provided SDK (unmodified)
@@ -280,10 +281,6 @@ Observations:
 
 ```console
 $ make run
-[1/11] fn_add_numbers (...)
-...
-[11/11] fn_substitute_string_with_regex (...)
-Total: ...
 [
   {
     "prompt": "Greet shrek",
@@ -292,6 +289,7 @@ Total: ...
   },
   ...
 ]
+Total: ...
 ```
 
 The time printed after each prompt depends on the machine.
@@ -308,6 +306,8 @@ Error: file not found: missing.json
 - everything about tokenization: https://www.openxcell.com/blog/llm-tokenization
 - JSON specification, RFC 8259: https://www.rfc-editor.org/rfc/rfc8259
 - Python `re` module: https://docs.python.org/3/library/re.html
+- learn more about logits: https://ai-tldr.dev/learn/llm-fundamentals/text-generation/logits-explained/
+- what is inference: https://www.geeksforgeeks.org/artificial-intelligence/inference-in-ai/
 
 
 ### Use of AI

@@ -1,4 +1,4 @@
-"""Loading and saving of the JSON files, with clear error messages."""
+"""Loading and saving of the JSON files inside the data directory"""
 
 import json
 from pathlib import Path

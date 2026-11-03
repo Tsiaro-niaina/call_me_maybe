@@ -17,7 +17,7 @@ from .rules import (
     OPENING_QUOTE,
     read_string_token,
 )
-from .vocab import Vocabulary
+from .vocabulary import Vocabulary
 
 MAX_STRING_TOKENS = 150
 MAX_NUMBER_TOKENS = 25
