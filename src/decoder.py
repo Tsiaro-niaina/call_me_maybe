@@ -88,7 +88,7 @@ class Decoder(BaseModel):
                 word for word in words if word.startswith(word_so_far)
             ]
             if len(possible_words) == 1:
-                return possible_words[0]  # no need to ask the model
+                return possible_words[0]
 
             def is_valid(token_text: str) -> bool:
                 if token_text[0] in end_characters:
@@ -137,7 +137,7 @@ class Decoder(BaseModel):
                 context_ids, is_valid
             )
             if token_text[0] in CHARACTERS_AFTER_VALUE:
-                break  # the model ended the number
+                break
             number_text += token_text
             context_ids.append(token_id)
         if number_complete.fullmatch(number_text) is None:
@@ -175,9 +175,6 @@ class Decoder(BaseModel):
                     return False
                 content, is_end, _ = reading
                 if string_text == "" and content.startswith(" "):
-                    # The model writes ' *' for '*': a value never starts
-                    # with a space glued to text. A value made only of
-                    # spaces stays possible.
                     return is_end and content.strip(" ") == ""
                 return True
 
@@ -187,13 +184,11 @@ class Decoder(BaseModel):
             reading = read_string_token(
                 token_text, after_backslash, is_opening=not is_opened
             )
-            if reading is None:  # cannot happen: the token was checked
+            if reading is None:
                 raise ValueError(f"invalid string token: {token_text!r}")
             content, is_end, after_backslash = reading
             string_text += content
             if is_end:
-                # The closing token is not kept: it also holds the end of
-                # the skeleton, which is written separately.
                 written_text = content
                 if not is_opened:
                     written_text = OPENING_QUOTE + content
@@ -226,7 +221,6 @@ class Decoder(BaseModel):
         )
         parameters = function_by_name[function_name].parameters
         argument_values: dict[str, Any] = {}
-        # Skeleton text not yet written in the context.
         skeleton_text = function_name + '", "parameters": {'
         for position, parameter_name in enumerate(parameters):
             parameter_type = parameters[parameter_name].type

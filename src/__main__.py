@@ -9,7 +9,7 @@ from .decoder import Decoder
 from .loader import DataError, load_functions, load_prompts, save_results
 from .models import FunctionCall
 from .prompt import build_prompt
-from .vocab import Vocabulary
+from .vocabulary import Vocabulary
 
 DEFAULT_FUNCTIONS = "data/input/functions_definition.json"
 DEFAULT_INPUT = "data/input/function_calling_tests.json"

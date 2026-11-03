@@ -1,3 +1,8 @@
+export BASE ?= $(HOME)/goinfre/$(USER)
+export HUGFACE_HOME ?= $(BASE)/huggingface_cache
+export UV_CACHE_DIR ?= $(BASE)/uv_cache
+export UV_LINK_MODE ?= copy
+
 .PHONY: install run debug clean lint lint-strict
 
 install:
