@@ -1,4 +1,4 @@
-"""Function calling with constrained decoding"""
+"""Function calling with constrained decoding."""
 
 try:
     from .decoder import Decoder

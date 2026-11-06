@@ -5,18 +5,12 @@ import json
 import sys
 import textwrap
 import time
-
 from llm_sdk import Small_LLM_Model
-
 from .decoder import Decoder
 from .loader import DataError, load_functions, load_prompts, save_results
 from .models import FunctionCall
 from .prompt import build_prompt
 from .vocabulary import Vocabulary
-
-DEFAULT_FUNCTIONS = "data/input/functions_definition.json"
-DEFAULT_INPUT = "data/input/function_calling_tests.json"
-DEFAULT_OUTPUT = "data/output/function_calling_results.json"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -32,9 +26,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="python -m src",
         description="Translate natural language prompts into function calls.",
     )
-    parser.add_argument("--functions_definition", default=DEFAULT_FUNCTIONS)
-    parser.add_argument("--input", default=DEFAULT_INPUT)
-    parser.add_argument("--output", default=DEFAULT_OUTPUT)
+    parser.add_argument("--functions_definition",
+                        default="data/input/functions_definition.json")
+    parser.add_argument("--input",
+                        default="data/input/function_calling_tests.json")
+    parser.add_argument("--output",
+                        default="data/output/function_calling_results.json")
     return parser.parse_args(argv)
 
 

@@ -11,7 +11,13 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["flake8", "mypy", "pytest"]
+dev = [
+    "flake8",
+    "flake8-docstrings",
+    "flake8-pyproject",
+    "mypy",
+    "pytest",
+]
 
 [tool.uv]
 package = false
@@ -33,3 +39,18 @@ exclude = ["llm_sdk", ".venv"]
 [[tool.mypy.overrides]]
 module = "llm_sdk.*"
 ignore_errors = true
+
+[tool.flake8]
+max-line-length = 88
+
+select = ["E", "F", "W", "C901", "D"]
+exclude = [
+    ".venv",
+    "llm_sdk",
+]
+
+ignore = [
+    "D100",
+    "D104",
+    "W503",
+]
